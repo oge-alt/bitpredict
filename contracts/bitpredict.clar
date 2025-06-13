@@ -222,3 +222,113 @@
         )
     )
 )
+
+;; Enhanced market resolution with better validation
+(define-public (resolve-market (market-id uint) (end-price uint))
+    (let
+        (
+            (market (unwrap! (map-get? markets market-id) ERR_MARKET_NOT_FOUND))
+            (current-block stacks-block-height)
+        )
+        ;; Authorization and validation
+        (asserts! (is-eq tx-sender (var-get oracle-address)) ERR_UNAUTHORIZED)
+        (asserts! (>= current-block (get end-block market)) ERR_MARKET_CLOSED)
+        (asserts! (not (get resolved market)) ERR_ALREADY_RESOLVED)
+        (asserts! (> end-price u0) ERR_INVALID_PRICE)
+
+        ;; Resolve market
+        (map-set markets market-id
+            (merge market
+                {
+                    end-price: end-price,
+                    resolved: true,
+                    resolution-block: current-block
+                }
+            )
+        )
+        (ok {market-id: market-id, end-price: end-price})
+    )
+)
+
+;; Enhanced winnings claim with improved calculation and tracking
+(define-public (claim-winnings (market-id uint))
+    (let
+        (
+            (market (unwrap! (map-get? markets market-id) ERR_MARKET_NOT_FOUND))
+            (prediction (unwrap! (map-get? user-predictions {market-id: market-id, user: tx-sender}) ERR_MARKET_NOT_FOUND))
+        )
+        ;; Validation
+        (asserts! (get resolved market) ERR_MARKET_NOT_RESOLVED)
+        (asserts! (not (get claimed prediction)) ERR_ALREADY_CLAIMED)
+
+        (let
+            (
+                (winning-prediction (if (> (get end-price market) (get start-price market)) 
+                                   PREDICTION_UP 
+                                   PREDICTION_DOWN))
+                (total-pool (+ (get total-up-stake market) (get total-down-stake market)))
+                (winning-pool (if (is-eq winning-prediction PREDICTION_UP) 
+                               (get total-up-stake market) 
+                               (get total-down-stake market)))
+                (user-stake (get stake prediction))
+            )
+            ;; Check if user won
+            (asserts! (is-eq (get prediction prediction) winning-prediction) ERR_INVALID_PREDICTION)
+            (asserts! (> winning-pool u0) ERR_INVALID_PARAMETER)
+            
+            (let
+                (
+                    ;; Calculate proportional winnings
+                    (gross-winnings (/ (* user-stake total-pool) winning-pool))
+                    (platform-fee (/ (* gross-winnings (var-get platform-fee-percentage)) u100))
+                    (net-payout (- gross-winnings platform-fee))
+                )
+                ;; Execute transfers
+                (try! (as-contract (stx-transfer? net-payout (as-contract tx-sender) tx-sender)))
+                (try! (as-contract (stx-transfer? platform-fee (as-contract tx-sender) CONTRACT_OWNER)))
+                
+                ;; Update records
+                (map-set user-predictions 
+                    {market-id: market-id, user: tx-sender}
+                    (merge prediction {claimed: true})
+                )
+                
+                ;; Update user stats
+                (update-user-stats tx-sender net-payout true)
+                
+                ;; Update global fee tracking
+                (var-set total-fees-collected (+ (var-get total-fees-collected) platform-fee))
+                
+                (ok {payout: net-payout, fee: platform-fee})
+            )
+        )
+    )
+)
+
+;; READ-ONLY FUNCTIONS
+
+;; Enhanced market getter with calculated fields
+(define-read-only (get-market-details (market-id uint))
+    (match (map-get? markets market-id)
+        market (ok (merge market 
+            {
+                total-pool: (+ (get total-up-stake market) (get total-down-stake market)),
+                up-percentage: (if (> (+ (get total-up-stake market) (get total-down-stake market)) u0)
+                                 (/ (* (get total-up-stake market) u100) 
+                                    (+ (get total-up-stake market) (get total-down-stake market)))
+                                 u50),
+                is-active: (and (>= stacks-block-height (get start-block market))
+                               (< stacks-block-height (get end-block market))
+                               (not (get resolved market)))
+            }))
+        ERR_MARKET_NOT_FOUND
+    )
+)
+
+;; Get user prediction with additional context
+(define-read-only (get-user-prediction-details (market-id uint) (user principal))
+    (match (map-get? user-predictions {market-id: market-id, user: user})
+        prediction (ok prediction)
+        ERR_MARKET_NOT_FOUND
+    )
+)
