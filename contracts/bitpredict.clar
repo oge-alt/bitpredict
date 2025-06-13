@@ -105,3 +105,120 @@
         total-losses: uint
     }
 )
+
+;; PUBLIC FUNCTIONS - MARKET MANAGEMENT
+
+;; Creates a new prediction market with enhanced validation
+(define-public (create-market 
+    (asset-name (string-ascii 32))
+    (start-price uint) 
+    (start-block uint) 
+    (end-block uint))
+    (let
+        (
+            (market-id (var-get market-counter))
+            (current-block stacks-block-height)
+        )
+        ;; Authorization & validation checks
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+        (asserts! (> end-block start-block) ERR_INVALID_TIMEFRAME)
+        (asserts! (>= (- end-block start-block) MINIMUM_MARKET_DURATION) ERR_INVALID_TIMEFRAME)
+        (asserts! (>= start-block current-block) ERR_INVALID_TIMEFRAME)
+        (asserts! (> start-price u0) ERR_INVALID_PRICE)
+        (asserts! (> (len asset-name) u0) ERR_INVALID_PARAMETER)
+        
+        ;; Create market
+        (map-set markets market-id
+            {
+                creator: tx-sender,
+                asset-name: asset-name,
+                start-price: start-price,
+                end-price: u0,
+                total-up-stake: u0,
+                total-down-stake: u0,
+                start-block: start-block,
+                end-block: end-block,
+                resolution-block: u0,
+                resolved: false,
+                total-participants: u0
+            }
+        )
+        
+        ;; Update counter
+        (var-set market-counter (+ market-id u1))
+        (ok market-id)
+    )
+)
+
+;; Enhanced prediction function with better validation and tracking
+(define-public (make-prediction 
+    (market-id uint) 
+    (prediction (string-ascii 4)) 
+    (stake uint))
+    (let
+        (
+            (market (unwrap! (map-get? markets market-id) ERR_MARKET_NOT_FOUND))
+            (current-block stacks-block-height)
+            (existing-prediction (map-get? user-predictions {market-id: market-id, user: tx-sender}))
+        )
+        ;; Validation checks
+        (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+        (asserts! (and (>= current-block (get start-block market)) 
+                      (< current-block (get end-block market))) 
+                 ERR_MARKET_CLOSED)
+        (asserts! (or (is-eq prediction PREDICTION_UP) (is-eq prediction PREDICTION_DOWN)) 
+                 ERR_INVALID_PREDICTION)
+        (asserts! (>= stake (var-get minimum-stake)) 
+                 ERR_INSUFFICIENT_STAKE)
+        (asserts! (>= (stx-get-balance tx-sender) stake) 
+                 ERR_INSUFFICIENT_BALANCE)
+        (asserts! (not (get resolved market)) ERR_MARKET_CLOSED)
+
+        ;; Handle existing predictions (update stake)
+        (let
+            (
+                (final-stake (if (is-some existing-prediction)
+                               (+ stake (get stake (unwrap-panic existing-prediction)))
+                               stake))
+                (is-new-participant (is-none existing-prediction))
+            )
+            
+            ;; Transfer stake to contract
+            (try! (stx-transfer? stake tx-sender (as-contract tx-sender)))
+            
+            ;; Update prediction record
+            (map-set user-predictions 
+                {market-id: market-id, user: tx-sender}
+                {
+                    prediction: prediction, 
+                    stake: final-stake, 
+                    claimed: false,
+                    timestamp: current-block
+                }
+            )
+            
+            ;; Update market totals
+            (map-set markets market-id
+                (merge market
+                    {
+                        total-up-stake: (if (is-eq prediction PREDICTION_UP)
+                                        (+ (get total-up-stake market) stake)
+                                        (get total-up-stake market)),
+                        total-down-stake: (if (is-eq prediction PREDICTION_DOWN)
+                                          (+ (get total-down-stake market) stake)
+                                          (get total-down-stake market)),
+                        total-participants: (if is-new-participant
+                                           (+ (get total-participants market) u1)
+                                           (get total-participants market))
+                    }
+                )
+            )
+            
+            ;; Update global volume
+            (var-set total-volume (+ (var-get total-volume) stake))
+            
+            (ok {market-id: market-id, total-stake: final-stake})
+        )
+    )
+)
