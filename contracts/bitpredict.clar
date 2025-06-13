@@ -332,3 +332,113 @@
         ERR_MARKET_NOT_FOUND
     )
 )
+
+;; Get user statistics
+(define-read-only (get-user-stats (user principal))
+    (default-to 
+        {total-predictions: u0, total-winnings: u0, total-losses: u0}
+        (map-get? user-stats user)
+    )
+)
+
+;; Platform statistics
+(define-read-only (get-platform-stats)
+    (ok {
+        total-markets: (var-get market-counter),
+        total-volume: (var-get total-volume),
+        total-fees: (var-get total-fees-collected),
+        contract-balance: (stx-get-balance (as-contract tx-sender)),
+        is-paused: (var-get protocol-paused)
+    })
+)
+
+;; Platform configuration
+(define-read-only (get-platform-config)
+    (ok {
+        oracle-address: (var-get oracle-address),
+        minimum-stake: (var-get minimum-stake),
+        platform-fee: (var-get platform-fee-percentage),
+        protocol-paused: (var-get protocol-paused)
+    })
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Update oracle address
+(define-public (set-oracle-address (new-address principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (asserts! (not (is-eq new-address CONTRACT_OWNER)) ERR_INVALID_PARAMETER)
+        (asserts! (is-standard new-address) ERR_INVALID_PARAMETER)
+        (var-set oracle-address new-address)
+        (ok true)
+    )
+)
+
+;; Update minimum stake
+(define-public (set-minimum-stake (new-minimum uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (asserts! (> new-minimum u0) ERR_INVALID_PARAMETER)
+        (var-set minimum-stake new-minimum)
+        (ok true)
+    )
+)
+
+;; Update platform fee with cap
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (asserts! (<= new-fee MAX_FEE_PERCENTAGE) ERR_INVALID_PARAMETER)
+        (var-set platform-fee-percentage new-fee)
+        (ok true)
+    )
+)
+
+;; Emergency pause mechanism
+(define-public (toggle-protocol-pause)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (var-set protocol-paused (not (var-get protocol-paused)))
+        (ok (var-get protocol-paused))
+    )
+)
+
+;; Withdraw accumulated fees
+(define-public (withdraw-fees (amount uint))
+    (let
+        (
+            (contract-balance (stx-get-balance (as-contract tx-sender)))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_OWNER_ONLY)
+        (asserts! (<= amount contract-balance) ERR_INSUFFICIENT_BALANCE)
+        (try! (as-contract (stx-transfer? amount (as-contract tx-sender) CONTRACT_OWNER)))
+        (ok amount)
+    )
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+;; Update user statistics
+(define-private (update-user-stats (user principal) (amount uint) (is-win bool))
+    (let
+        (
+            (current-stats (default-to 
+                {total-predictions: u0, total-winnings: u0, total-losses: u0}
+                (map-get? user-stats user)))
+        )
+        (map-set user-stats user
+            (merge current-stats
+                {
+                    total-predictions: (+ (get total-predictions current-stats) u1),
+                    total-winnings: (if is-win 
+                                   (+ (get total-winnings current-stats) amount)
+                                   (get total-winnings current-stats)),
+                    total-losses: (if (not is-win)
+                                 (+ (get total-losses current-stats) amount)
+                                 (get total-losses current-stats))
+                }
+            )
+        )
+    )
+)
